@@ -600,6 +600,13 @@ let mode = null;          // 'camera' | 'xr'
 let stream = null;
 let xrSupported = false;
 let xrRefSpace = null, hitSource = null, transientSource = null, xrDrag = null, floorFound = false;
+let facing = 'environment', mirrored = false, switchToHands = false;
+const tmpV = new THREE.Vector3();
+const PLANE_Z0 = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const _ndc = new THREE.Vector2();
+
+const HAND_HINT = '손으로 쳐서 튕기기 · 엄지+검지로 집어 들고 던지기 · 양손으로 집어 늘리기';
+const TOUCH_HINT = '탭: 튕기기 · 낙서 드래그: 들고 던지기 · 두 손가락으로 집어 늘리기 · 빈 곳 드래그: 회전';
 
 if (navigator.xr && navigator.xr.isSessionSupported) {
   navigator.xr.isSessionSupported('immersive-ar').then((v) => { xrSupported = v; }).catch(() => {});
@@ -631,12 +638,10 @@ function initThree() {
   reticle.visible = false;
   scene.add(reticle);
 
-  // 카메라 미사용 시 공간감을 위한 바닥 그리드
   grid = new THREE.GridHelper(3, 30, 0x3f3f46, 0x27272a);
   grid.visible = false;
   scene.add(grid);
 
-  // WebXR 화면 터치 입력
   controller = renderer.xr.getController(0);
   controller.addEventListener('selectstart', onXRSelectStart);
   controller.addEventListener('selectend', () => { xrDrag = null; });
@@ -688,10 +693,10 @@ async function buildAsset(ex) {
   disposeAsset();
   const tex = await new THREE.TextureLoader().loadAsync(ex.url);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.premultiplyAlpha = true; // 가장자리 검은 테두리 방지
+  tex.premultiplyAlpha = true;
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
 
-  const MAX = 0.35; // 최장변 35cm
+  const MAX = 0.35;
   let w, h;
   if (ex.w >= ex.h) { w = MAX; h = MAX * ex.h / ex.w; } else { h = MAX; w = MAX * ex.w / ex.h; }
 
@@ -714,16 +719,17 @@ async function buildAsset(ex) {
   asset = { tex, w, h, geo, faceMat, sideMat, hitGeo, hitMat, shadowGeo, shadowMat, url: ex.url };
 }
 
-function makeDoodle() {
+// root(위치) → pivot(기울기·크기) → defA/defB(임의 축 방향 늘이기) → body(Y회전) → 레이어
+function makeDoodle(centered = false) {
   const A = asset;
-  const root = new THREE.Group();   // 위치 · 방향
-  const pivot = new THREE.Group();  // 크기 · 바운스 (바닥 기준)
-  const body = new THREE.Group();   // 회전 애니메이션
-  body.position.y = A.h / 2;
-  pivot.add(body);
-  root.add(pivot);
+  const root = new THREE.Group();
+  const pivot = new THREE.Group();
+  const defA = new THREE.Group();
+  const defB = new THREE.Group();
+  const body = new THREE.Group();
+  body.position.y = centered ? 0 : A.h / 2;
+  defB.add(body); defA.add(defB); pivot.add(defA); root.add(pivot);
 
-  // 레이어를 겹쳐 두께감 있는 2.5D 스티커 형태로
   const N = 8, D = 0.014;
   for (let i = 0; i < N; i++) {
     const face = i === 0 || i === N - 1;
@@ -741,7 +747,7 @@ function makeDoodle() {
   shadow.position.y = 0.002;
   root.add(shadow);
 
-  root.userData = { pivot, body, shadow, hit, s: 1, b: -1, appear: 0, phase: Math.random() * Math.PI * 2 };
+  root.userData = { pivot, defA, defB, body, shadow, hit, s: 1, b: -1, appear: 0, phase: Math.random() * Math.PI * 2 };
   return root;
 }
 
@@ -751,10 +757,12 @@ function clearDoodles() {
 }
 
 function bounce(o) {
+  if (mode === 'camera') { poke(null); return; }
   o.userData.b = 0;
   if (navigator.vibrate) navigator.vibrate(12);
 }
 
+// WebXR 모드용 탭 애니메이션
 function updateDoodle(o, dt, t) {
   const u = o.userData;
   let sq = 0, hop = 0, spin = 0;
@@ -762,16 +770,16 @@ function updateDoodle(o, dt, t) {
   if (u.b >= 0) {
     u.b += dt;
     const k = u.b;
-    sq = Math.exp(-4.5 * k) * Math.sin(k * 20) * 0.22;           // 스쿼시 & 스트레치
-    hop = k < 0.42 ? Math.sin(Math.PI * k / 0.42) : 0;            // 점프
-    spin = easeOutCubic(Math.min(k / 0.8, 1));                     // 한 바퀴 회전
+    sq = Math.exp(-4.5 * k) * Math.sin(k * 20) * 0.22;
+    hop = k < 0.42 ? Math.sin(Math.PI * k / 0.42) : 0;
+    spin = easeOutCubic(Math.min(k / 0.8, 1));
     if (k > 1.8) u.b = -1;
   }
   const s = u.s * easeOutBack(u.appear);
   u.pivot.scale.set(s * (1 + sq), s * (1 - sq), s * (1 + sq));
   u.pivot.position.y = hop * 0.12 * u.s;
   u.body.rotation.y = spin * Math.PI * 2;
-  u.body.rotation.z = Math.sin(t * 1.3 + u.phase) * 0.03;          // 잔잔한 흔들림
+  u.body.rotation.z = Math.sin(t * 1.3 + u.phase) * 0.03;
   u.shadow.scale.setScalar(Math.max(0.001, s * (1 - hop * 0.35)));
 }
 
@@ -780,16 +788,290 @@ function pickDoodle() {
   return hits.length ? hits[0] : null;
 }
 
+/* =====================================================================
+   3. PHYSICS (카메라 모드: 화면과 평행한 z=0 평면 위 2D 강체 + 탄성 변형)
+   ===================================================================== */
+const PH = {
+  G: 4.2,          // 중력 (m/s²) — 실제보다 약간 낮춰 둥실한 느낌
+  REST: 0.55,      // 바닥·벽 반발 계수
+  HAND_REST: 0.8,  // 손과 부딪힐 때 반발 계수
+  AIR: 0.35,       // 공기 저항
+  UPRIGHT: 9,      // 오뚝이처럼 바로 서려는 힘
+  ANG_DAMP: 1.6,
+  K: 170, C: 17,   // 잡기 스프링 강성 / 감쇠
+  DEF_K: 230, DEF_C: 9, // 젤리 변형 스프링
+};
+const HAND_R = Array.from({ length: 21 }, (_, i) => ([4, 8, 12, 16, 20].includes(i) ? 0.024 : i === 0 ? 0.03 : 0.02));
+const bounds = { left: -0.5, right: 0.5, floor: 0, ceil: 0.8 };
+const phys = {
+  c: new THREE.Vector2(), v: new THREE.Vector2(), ang: 0, w: 0, yaw: 0, yawV: 0,
+  def: { axis: 0, s: 1, sv: 0, target: 1 },
+  grabs: new Map(), stretch: null, lastBuzz: 0,
+};
+const wrapA = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+function screenToPlane(x, y, out) {
+  _ndc.set((x / window.innerWidth) * 2 - 1, -(y / window.innerHeight) * 2 + 1);
+  raycaster.setFromCamera(_ndc, camera);
+  return raycaster.ray.intersectPlane(PLANE_Z0, out);
+}
+
+function updateBounds() {
+  const W = window.innerWidth, H = window.innerHeight;
+  if (screenToPlane(0, H / 2, tmpV)) bounds.left = tmpV.x;
+  if (screenToPlane(W, H / 2, tmpV)) bounds.right = tmpV.x;
+  if (screenToPlane(W / 2, Math.max(H * 0.6, H - 120), tmpV)) bounds.floor = tmpV.y; // 하단 버튼 위가 바닥
+  if (screenToPlane(W / 2, 0, tmpV)) bounds.ceil = tmpV.y;
+}
+
+function halfExt() {
+  const s = doodles[0] ? doodles[0].userData.s : 1;
+  const cy = Math.max(Math.abs(Math.cos(phys.yaw)), 0.18); // Y로 돌리면 옆에서 본 만큼 얇아짐
+  return { hx: (asset.w / 2) * s * cy, hy: (asset.h / 2) * s };
+}
+
+function resetPhys(drop = true) {
+  const { hy } = halfExt();
+  phys.c.set(0, drop ? Math.min(bounds.ceil - hy - 0.02, bounds.floor + hy + 0.4) : bounds.floor + hy);
+  phys.v.set(0, 0);
+  phys.ang = 0; phys.w = 0; phys.yaw = 0; phys.yawV = 0;
+  Object.assign(phys.def, { axis: 0, s: 1, sv: 0, target: 1 });
+  phys.grabs.clear();
+  phys.stretch = null;
+}
+
+function rotV(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return new THREE.Vector2(v.x * c - v.y * s, v.x * s + v.y * c);
+}
+function toLocal(p) {
+  return rotV(new THREE.Vector2(p.x - phys.c.x, p.y - phys.c.y), -phys.ang);
+}
+function isOnObject(p, margin) {
+  if (!p || !asset) return false;
+  const l = toLocal(p);
+  const { hx, hy } = halfExt();
+  return Math.abs(l.x) <= hx + margin && Math.abs(l.y) <= hy + margin;
+}
+
+function buzz(ms = 10) {
+  const now = performance.now();
+  if (now - phys.lastBuzz < 120) return;
+  phys.lastBuzz = now;
+  if (navigator.vibrate) navigator.vibrate(ms);
+}
+
+// 충돌 방향(worldAngle)으로 찌그러뜨렸다가 탄성으로 복원
+function squash(worldAngle, amount) {
+  const d = phys.def;
+  if (phys.stretch) return;
+  if (Math.abs(d.s - 1) < 0.15) d.axis = worldAngle - phys.ang;
+  d.sv -= clamp(amount, 0, 4);
+}
+
+function poke(p) {
+  const P = phys;
+  const dx = p ? P.c.x - p.x : (Math.random() - 0.5) * 0.1;
+  P.v.y = Math.max(P.v.y, 0) + 2.0;
+  P.v.x += clamp(dx * 6, -1.2, 1.2);
+  P.w += (p ? -dx : Math.random() - 0.5) * 14;
+  squash(Math.PI / 2, 1.6);
+  buzz(12);
+}
+
+function addGrab(id, p) {
+  if (phys.grabs.size >= 2) return false;
+  phys.grabs.set(id, { p: p.clone(), local: toLocal(p) });
+  phys.yawV = 0;
+  if (phys.grabs.size === 2) {
+    const [a, b] = [...phys.grabs.values()];
+    phys.stretch = {
+      d0: Math.max(0.02, a.p.distanceTo(b.p)) / phys.def.s,
+      a0: Math.atan2(b.p.y - a.p.y, b.p.x - a.p.x),
+      ang0: phys.ang,
+    };
+  }
+  return true;
+}
+
+function removeGrab(id) {
+  if (!phys.grabs.delete(id)) return;
+  if (phys.stretch) { phys.stretch = null; phys.def.target = 1; } // 놓으면 탄성으로 출렁이며 복원
+  for (const g of phys.grabs.values()) g.local = toLocal(g.p);
+}
+
+function physStep(dt) {
+  const P = phys, D = P.def;
+  const { hx, hy } = halfExt();
+  const grabs = [...P.grabs.values()];
+
+  if (P.stretch && grabs.length >= 2) {
+    // 양손(두 손가락)으로 잡고 늘리기
+    const a = grabs[0].p, b = grabs[1].p;
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    P.v.x += ((mx - P.c.x) * PH.K - P.v.x * PH.C) * dt;
+    P.v.y += ((my - P.c.y) * PH.K - P.v.y * PH.C) * dt;
+    const angW = Math.atan2(b.y - a.y, b.x - a.x);
+    const target = P.stretch.ang0 + wrapA(angW - P.stretch.a0);
+    const prev = P.ang;
+    P.ang += wrapA(target - P.ang) * Math.min(1, dt * 18);
+    P.w = (P.ang - prev) / dt;
+    const ns = clamp(a.distanceTo(b) / P.stretch.d0, 0.4, 3.2);
+    D.sv = (ns - D.s) / dt;
+    D.s = ns;
+    D.axis = angW - P.ang;
+    P.c.x += P.v.x * dt; P.c.y += P.v.y * dt;
+  } else {
+    P.v.y -= PH.G * dt;
+    D.target = 1;
+    if (grabs.length === 1) {
+      // 한 점을 잡고 매달린 상태: 스프링 + 진자 회전 + 속도 방향 젤리 늘어짐
+      const g = grabs[0];
+      const r = rotV(g.local, P.ang);
+      const fx = (g.p.x - (P.c.x + r.x)) * PH.K - P.v.x * PH.C;
+      const fy = (g.p.y - (P.c.y + r.y)) * PH.K - P.v.y * PH.C;
+      P.v.x += fx * dt; P.v.y += fy * dt;
+      const I = (hx * hx + hy * hy) / 3;
+      P.w += ((r.x * fy - r.y * fx) / I * 0.35 - P.w * 3) * dt;
+      const sp = P.v.length();
+      if (sp > 0.08) {
+        if (Math.abs(D.s - 1) < 0.25) D.axis = Math.atan2(P.v.y, P.v.x) - P.ang;
+        D.target = 1 + Math.min(sp * 0.14, 0.5);
+      }
+    } else {
+      P.w += (-wrapA(P.ang) * PH.UPRIGHT - P.w * PH.ANG_DAMP) * dt;
+    }
+    P.v.multiplyScalar(Math.exp(-PH.AIR * dt));
+    P.c.x += P.v.x * dt; P.c.y += P.v.y * dt;
+    P.w = clamp(P.w, -25, 25);
+    P.ang += P.w * dt;
+    const acc = -PH.DEF_K * (D.s - D.target) - PH.DEF_C * D.sv;
+    D.sv += acc * dt;
+    D.s = clamp(D.s + D.sv * dt, 0.4, 3.2);
+  }
+  collideBounds(hx, hy, dt);
+}
+
+function collideBounds(hx, hy, dt) {
+  const P = phys;
+  const ca = Math.abs(Math.cos(P.ang)), sa = Math.abs(Math.sin(P.ang));
+  const ex = ca * hx + sa * hy, ey = sa * hx + ca * hy;
+
+  if (P.c.y - ey < bounds.floor) {
+    P.c.y = bounds.floor + ey;
+    if (P.v.y < 0) {
+      const imp = -P.v.y;
+      P.v.y = imp > 0.25 ? imp * PH.REST : 0;
+      if (imp > 0.5) {
+        squash(Math.PI / 2, imp * 0.9); buzz(8);
+        P.w += -P.v.x * 1.5;                     // 비스듬히 떨어지면 구르듯 회전
+      }
+    }
+    P.v.x *= Math.exp(-3 * dt);                  // 바닥 마찰
+    P.w *= Math.exp(-2 * dt);
+  }
+  if (P.c.y + ey > bounds.ceil) {
+    P.c.y = bounds.ceil - ey;
+    if (P.v.y > 0) { const imp = P.v.y; P.v.y = -imp * PH.REST; if (imp > 0.5) squash(Math.PI / 2, imp * 0.7); }
+  }
+  if (P.c.x - ex < bounds.left) {
+    P.c.x = bounds.left + ex;
+    if (P.v.x < 0) { const imp = -P.v.x; P.v.x = imp * PH.REST; if (imp > 0.5) squash(0, imp * 0.8); }
+  }
+  if (P.c.x + ex > bounds.right) {
+    P.c.x = bounds.right - ex;
+    if (P.v.x > 0) { const imp = P.v.x; P.v.x = -imp * PH.REST; if (imp > 0.5) squash(0, imp * 0.8); }
+  }
+}
+
+// 손 관절 21개를 작은 원 콜라이더로 보고 오브젝트(회전된 상자)와 충돌 처리
+function handCollide() {
+  if (phys.stretch || !asset) return;
+  const { hx, hy } = halfExt();
+  const I = (hx * hx + hy * hy) / 3;
+  const now = performance.now();
+  for (const st of handState.values()) {
+    st.touch = false;
+    if (!st.world || st.grab || now < st.noCollideUntil) continue;
+    for (let i = 0; i < 21; i++) {
+      if (contact(st.world[i], st.vel[i], HAND_R[i], hx, hy, I)) st.touch = true;
+    }
+  }
+}
+
+function contact(p, vp, R, hx, hy, I) {
+  const P = phys;
+  const l = toLocal(p);
+  const qx = clamp(l.x, -hx, hx), qy = clamp(l.y, -hy, hy);
+  let nx = l.x - qx, ny = l.y - qy;
+  const dist = Math.hypot(nx, ny);
+  let pen;
+  if (dist > R) return false;
+  if (dist > 1e-6) { nx /= dist; ny /= dist; pen = R - dist; }
+  else {
+    const px = hx - Math.abs(l.x), py = hy - Math.abs(l.y);
+    if (px < py) { nx = Math.sign(l.x) || 1; ny = 0; pen = px + R; }
+    else { nx = 0; ny = Math.sign(l.y) || 1; pen = py + R; }
+  }
+  const c = Math.cos(P.ang), s = Math.sin(P.ang);
+  const wx = nx * c - ny * s, wy = nx * s + ny * c;   // 오브젝트 → 손 방향 법선
+  P.c.x -= wx * pen; P.c.y -= wy * pen;               // 겹친 만큼 밀어내기
+
+  const rvx = P.v.x - vp.x, rvy = P.v.y - vp.y;
+  const vn = rvx * wx + rvy * wy;                     // 손 쪽으로 다가가는 상대 속도
+  if (vn > 0) {
+    const j = (1 + PH.HAND_REST) * vn;
+    P.v.x -= j * wx; P.v.y -= j * wy;
+    const rx = qx * c - qy * s, ry = qx * s + qy * c; // 접촉점(중심 기준)
+    P.w += (rx * (-j * wy) - ry * (-j * wx)) / I * 0.6;
+    // 손이 미끄러지듯 스치면 그 방향으로 끌려가며 회전
+    const tx = -wy, ty = wx;
+    const vt = (vp.x - P.v.x) * tx + (vp.y - P.v.y) * ty;
+    P.v.x += tx * vt * 0.25; P.v.y += ty * vt * 0.25;
+    P.w += (rx * ty - ry * tx) * vt * 0.25 / I;
+    if (j > 0.4) squash(Math.atan2(wy, wx), j * 0.5);
+    if (j > 0.8) buzz(10);
+  }
+  return true;
+}
+
+function applyPhys(o, dt) {
+  const P = phys, u = o.userData;
+  if (u.appear < 1) u.appear = Math.min(1, u.appear + dt / 0.55);
+  const s = u.s * easeOutBack(u.appear);
+  o.position.set(P.c.x, P.c.y, 0);
+  o.rotation.set(0, 0, 0);
+  u.pivot.position.set(0, 0, 0);
+  u.pivot.rotation.set(0, 0, P.ang);
+  u.pivot.scale.setScalar(Math.max(0.001, s));
+  u.defA.rotation.z = P.def.axis;
+  u.defA.scale.set(P.def.s, 1 / Math.sqrt(P.def.s), 1);
+  u.defB.rotation.z = -P.def.axis;
+  u.body.rotation.set(0, P.yaw, 0);
+  const { hy } = halfExt();
+  const lift = Math.max(0, P.c.y - hy - bounds.floor);
+  u.shadow.position.set(0, bounds.floor - P.c.y + 0.002, 0);
+  u.shadow.scale.setScalar(Math.max(0.001, s * Math.max(0.25, 1 - lift * 1.4)));
+}
+
 /* ---- Render loop ---- */
 function loop(time, frame) {
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.elapsedTime;
   if (frame && mode === 'xr') xrUpdate(frame);
-  if (mode === 'camera') {
+  if (mode === 'camera' && doodles[0]) {
+    updateBounds();
     if (handEnabled && handLandmarker && stream) processHands();
-    applyInertia(dt);
+    if (dt > 0) {
+      applyInertia(dt);
+      handCollide();
+      const n = 3;
+      for (let i = 0; i < n; i++) physStep(dt / n);
+    }
+    applyPhys(doodles[0], dt);
+  } else {
+    for (const o of doodles) updateDoodle(o, dt, t);
   }
-  for (const o of doodles) updateDoodle(o, dt, t);
   renderer.render(scene, camera);
 }
 
@@ -802,7 +1084,7 @@ async function openAR() {
   btn.disabled = true;
   try {
     await buildAsset(ex);
-    // 손 인식은 카메라 영상에 직접 접근해야 하므로 카메라 모드가 기본.
+    // 손 인식·물리는 카메라 영상이 필요하므로 카메라 모드가 기본.
     // WebXR(바닥 배치)은 AR 화면의 '바닥 배치 AR' 버튼으로 전환.
     await startCameraMode();
   } finally {
@@ -812,7 +1094,7 @@ async function openAR() {
 
 function closeAR() {
   const session = renderer && renderer.xr.getSession();
-  if (session) { session.end(); return; } // 'end' 이벤트에서 teardown
+  if (session) { session.end(); return; }
   teardown();
 }
 
@@ -822,6 +1104,8 @@ function teardown() {
   video.srcObject = null;
   clearDoodles();
   clearHands();
+  phys.grabs.clear(); phys.stretch = null;
+  ptrs.clear(); gesture = null;
   if (reticle) reticle.visible = false;
   hitSource = transientSource = xrDrag = null;
   mode = null;
@@ -837,9 +1121,8 @@ $('#arBtn').addEventListener('click', openAR);
 $('#arClose').addEventListener('click', closeAR);
 $('#arReset').addEventListener('click', () => {
   if (mode === 'camera' && doodles[0]) {
-    const o = doodles[0];
-    o.position.set(0, 0, 0); o.rotation.set(0, 0, 0);
-    o.userData.s = 1; rotVel = 0; bounce(o);
+    doodles[0].userData.s = 1;
+    resetPhys(true);
   } else if (mode === 'xr') {
     clearDoodles();
     setHint(floorFound ? '바닥을 탭하여 낙서를 배치하세요' : '바닥을 천천히 비춰 주세요');
@@ -853,7 +1136,7 @@ $('#arFlip').addEventListener('click', async () => {
   catch (err) { console.warn(err); toast('다른 카메라를 사용할 수 없습니다'); facing = facing === 'environment' ? 'user' : 'environment'; }
 });
 $('#arHands').addEventListener('click', () => {
-  if (mode === 'xr') {           // WebXR → 손 인식 카메라 모드로 복귀
+  if (mode === 'xr') {
     switchToHands = true;
     const s = renderer.xr.getSession();
     if (s) s.end();
@@ -871,7 +1154,6 @@ $('#arXR').addEventListener('click', async () => {
     await startCameraMode();
   }
 });
-// WebXR dom-overlay: UI 버튼 탭이 3D select로 새지 않게
 $$('.ar-top, .ar-actions').forEach((el) => el.addEventListener('beforexrselect', (e) => e.preventDefault()));
 
 /* ---- iOS: Quick Look(USDZ) ---- */
@@ -897,7 +1179,7 @@ async function prepareQuickLook() {
   }
 }
 
-/* ---- Camera overlay mode (iOS · 데스크톱 · WebXR 미지원 기기) ---- */
+/* ---- Camera overlay mode ---- */
 async function startCameraMode() {
   mode = 'camera';
   arEl.className = 'open';
@@ -908,9 +1190,10 @@ async function startCameraMode() {
   grid.visible = false;
 
   camera.fov = 50;
-  camera.position.set(0, 0.24, 0.95);
-  camera.lookAt(0, 0.16, 0);
+  camera.position.set(0, 0.32, 1.0);
+  camera.lookAt(0, 0.32, 0);
   onResize();
+  camera.updateMatrixWorld();
 
   try {
     await startStream();
@@ -925,21 +1208,20 @@ async function startCameraMode() {
   $('#arHands').hidden = !stream;
 
   clearDoodles();
-  const o = makeDoodle();
+  const o = makeDoodle(true);
   scene.add(o);
   doodles.push(o);
+  updateBounds();
+  grid.position.y = bounds.floor;
+  resetPhys(true);
   clock.getDelta();
   renderer.setAnimationLoop(loop);
-  setTimeout(() => bounce(o), 350);
 
   if (stream && handEnabled) setHandEnabled(true);
   else updateHandUI();
 
   if (isIOS) prepareQuickLook();
 }
-
-let facing = 'environment';
-let mirrored = false;
 
 async function startStream() {
   const next = await navigator.mediaDevices.getUserMedia({
@@ -950,7 +1232,6 @@ async function startStream() {
   stream = next;
   video.srcObject = stream;
   await video.play();
-  // 전면(셀카)·노트북 웹캠은 거울처럼 좌우 반전해서 보여줘야 손 움직임이 자연스럽다
   const fm = stream.getVideoTracks()[0].getSettings().facingMode;
   mirrored = fm !== 'environment';
   arEl.classList.toggle('mirror', mirrored);
@@ -964,28 +1245,128 @@ function stopCamera() {
   video.srcObject = null;
   clearDoodles();
   clearHands();
+  phys.grabs.clear(); phys.stretch = null;
+  ptrs.clear(); gesture = null;
+}
+
+/* ---- 마우스·터치 (손 인식과 같은 물리 사용) ---- */
+const ptrs = new Map();
+let gesture = null, lastRotT = 0;
+
+function ptrWorld(e) {
+  const v = screenToPlane(e.clientX, e.clientY, new THREE.Vector3());
+  return v ? new THREE.Vector2(v.x, v.y) : null;
+}
+function pairDist() {
+  const [a, b] = [...ptrs.values()];
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function onCamDown(e) {
+  if (mode !== 'camera' || !doodles[0]) return;
+  e.preventDefault();
+  renderer.domElement.setPointerCapture(e.pointerId);
+  const rec = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, lx: e.clientX, t: performance.now(), moved: false, grab: false };
+  ptrs.set(e.pointerId, rec);
+  const pw = ptrWorld(e);
+  const margin = phys.grabs.size > 0 ? 0.15 : 0.02;
+  if (pw && phys.grabs.size < 2 && isOnObject(pw, margin) && addGrab('p' + e.pointerId, pw)) {
+    rec.grab = true;
+    gesture = null;
+    return;
+  }
+  if (ptrs.size === 1) { gesture = { type: 'rotate' }; phys.yawV = 0; }
+  else if (ptrs.size === 2 && phys.grabs.size === 0) {
+    gesture = { type: 'scale', d0: Math.max(1, pairDist()), s0: doodles[0].userData.s };
+  }
+}
+
+function onCamMove(e) {
+  const rec = ptrs.get(e.pointerId);
+  if (!rec) return;
+  rec.x = e.clientX; rec.y = e.clientY;
+  if (Math.hypot(rec.x - rec.sx, rec.y - rec.sy) > 6) rec.moved = true;
+  if (rec.grab) {
+    const g = phys.grabs.get('p' + e.pointerId);
+    const pw = ptrWorld(e);
+    if (g && pw) g.p.copy(pw);
+    return;
+  }
+  if (!gesture) return;
+  if (gesture.type === 'scale' && ptrs.size >= 2) {
+    doodles[0].userData.s = clamp(gesture.s0 * pairDist() / gesture.d0, 0.3, 3);
+  } else if (gesture.type === 'rotate' && rec.moved) {
+    const dx = e.clientX - rec.lx;
+    phys.yaw += dx * 0.012;
+    phys.yawV = dx * 0.012;
+    lastRotT = performance.now();
+    rec.lx = e.clientX;
+  }
+}
+
+function onCamUp(e) {
+  const rec = ptrs.get(e.pointerId);
+  if (!rec) return;
+  ptrs.delete(e.pointerId);
+  if (rec.grab) {
+    removeGrab('p' + e.pointerId);
+    if (!rec.moved && performance.now() - rec.t < 300) poke(ptrWorld(e));
+  }
+  if (gesture && gesture.type === 'rotate' && performance.now() - lastRotT > 80) phys.yawV = 0;
+  if (ptrs.size === 0 || (gesture && gesture.type === 'scale')) gesture = null;
+}
+
+function onCamWheel(e) {
+  if (mode !== 'camera' || !doodles[0]) return;
+  e.preventDefault();
+  const u = doodles[0].userData;
+  u.s = clamp(u.s * Math.exp(-e.deltaY * 0.0015), 0.3, 3);
+}
+
+function applyInertia(dt) {
+  if (gesture && gesture.type === 'rotate') return;
+  if (Math.abs(phys.yawV) < 0.0002) { phys.yawV = 0; return; }
+  phys.yaw += phys.yawV;
+  phys.yawV *= Math.pow(0.92, dt * 60);
+}
+
+function capture() {
+  if (mode !== 'camera') return;
+  const W = renderer.domElement.width, H = renderer.domElement.height;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  if (stream && video.videoWidth) {
+    const vr = video.videoWidth / video.videoHeight, cr = W / H;
+    let sw, sh, sx, sy;
+    if (vr > cr) { sh = video.videoHeight; sw = sh * cr; sx = (video.videoWidth - sw) / 2; sy = 0; }
+    else { sw = video.videoWidth; sh = sw / cr; sx = 0; sy = (video.videoHeight - sh) / 2; }
+    x.save();
+    if (mirrored) { x.translate(W, 0); x.scale(-1, 1); }
+    x.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
+    x.restore();
+  } else {
+    x.fillStyle = '#111113';
+    x.fillRect(0, 0, W, H);
+  }
+  renderer.render(scene, camera);
+  x.drawImage(renderer.domElement, 0, 0);
+  download(c.toDataURL('image/png'), 'doodle-ar.png');
+  toast('캡처 이미지를 저장했습니다');
 }
 
 /* =====================================================================
-   3. HAND TRACKING (MediaPipe Hand Landmarker)
-   - 검지로 콕 찌르기 → 튀어오르기
-   - 검지로 빠르게 쓸기 → 회전
-   - 엄지+검지 집기 → 잡아서 이동
-   - 양손 집기 → 벌리고 좁혀 크기 조절
+   4. HAND TRACKING (MediaPipe Hand Landmarker)
    ===================================================================== */
 const MP_VER = '0.10.14';
 const MP_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}`;
 const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
-const HAND_HINT = '검지로 콕: 튀어오르기 · 빠르게 쓸기: 회전 · 엄지+검지 집기: 잡아 옮기기 · 양손 집기: 크기';
-const TOUCH_HINT = '탭: 튀어오르기 · 드래그: 회전(빈 곳) / 이동(낙서) · 핀치: 크기';
 const HAND_LINKS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
 
 const handsCvs = $('#hands');
 const hctx = handsCvs.getContext('2d');
 let handLandmarker = null, handLoading = null, handEnabled = true, lastVideoTime = -1;
-let switchToHands = false;
 const handState = new Map();
-let twoHand = null;
 
 function loadHands() {
   if (handLandmarker) return Promise.resolve(handLandmarker);
@@ -1038,18 +1419,11 @@ async function setHandEnabled(on) {
 function clearHands() {
   hctx.setTransform(1, 0, 0, 1, 0, 0);
   hctx.clearRect(0, 0, handsCvs.width, handsCvs.height);
+  for (const st of handState.values()) if (st.grab) removeGrab(st.grab);
   handState.clear();
-  twoHand = null;
 }
 
 const dist2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-const lerp2 = (a, b, k) => (a ? { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k } : { ...b });
-
-function hitAt(p) {
-  const v = new THREE.Vector2((p.x / window.innerWidth) * 2 - 1, -(p.y / window.innerHeight) * 2 + 1);
-  raycaster.setFromCamera(v, camera);
-  return pickDoodle();
-}
 
 function processHands() {
   if (video.readyState < 2 || !video.videoWidth) return;
@@ -1059,7 +1433,7 @@ function processHands() {
     handsCvs.width = Math.round(W * hd);
     handsCvs.height = Math.round(H * hd);
   }
-  if (video.currentTime === lastVideoTime) return; // 새 프레임이 있을 때만 추론
+  if (video.currentTime === lastVideoTime) return;
   lastVideoTime = video.currentTime;
 
   let res;
@@ -1081,91 +1455,75 @@ function processHands() {
 
   const now = performance.now();
   const seen = new Set();
-  const pinchers = [];
   (res.landmarks || []).forEach((lm, i) => {
     let key = (res.handedness && res.handedness[i] && res.handedness[i][0] && res.handedness[i][0].categoryName) || 'hand';
     if (seen.has(key)) key += i;
     seen.add(key);
-    const pts = lm.map(toScreen);
     let st = handState.get(key);
-    if (!st) { st = { pinch: false, prevPinch: false, grab: null, wasHit: false, lastPoke: 0, t: now }; handState.set(key, st); }
+    if (!st) {
+      st = { key, pinch: false, grab: null, noCollideUntil: 0, t: now, world: null, vel: null, touch: false };
+      handState.set(key, st);
+    }
+    const pts = lm.map(toScreen);
     updateHand(st, pts, now);
     drawHand(pts, st);
-    if (st.pinch) pinchers.push(st);
   });
-  for (const [k, st] of handState) if (!seen.has(k)) { st.grab = null; handState.delete(k); }
-  updateTwoHands(pinchers);
+  for (const [k, st] of handState) {
+    if (!seen.has(k)) { if (st.grab) removeGrab(st.grab); handState.delete(k); }
+  }
 }
 
 function updateHand(st, pts, now) {
-  const o = doodles[0];
-  const dt = Math.max(1, now - st.t) / 1000;
+  const dt = Math.max(0.008, (now - st.t) / 1000);
+  const stale = now - st.t > 250;
   st.t = now;
 
-  const size = dist2(pts[0], pts[9]) || 1;               // 손 크기 기준으로 정규화
+  // 화면 좌표 → 물리 평면(월드) 좌표, 관절별 속도
+  const world = pts.map((p) => {
+    const v = screenToPlane(p.x, p.y, tmpV);
+    return v ? new THREE.Vector2(v.x, v.y) : new THREE.Vector2(9, 9);
+  });
+  if (st.world && !stale) {
+    st.vel = world.map((w, i) => {
+      const raw = new THREE.Vector2((w.x - st.world[i].x) / dt, (w.y - st.world[i].y) / dt);
+      if (raw.length() > 6) raw.setLength(6);
+      return st.vel ? st.vel[i].lerp(raw, 0.6) : raw;
+    });
+  } else {
+    st.vel = world.map(() => new THREE.Vector2());
+  }
+  st.world = world;
+
+  // 집기 판정 (손 크기로 정규화 + 히스테리시스)
+  const size = dist2(pts[0], pts[9]) || 1;
   const ratio = dist2(pts[4], pts[8]) / size;
-  st.pinch = st.pinch ? ratio < 0.45 : ratio < 0.3;      // 히스테리시스로 떨림 방지
+  const was = st.pinch;
+  st.pinch = was ? ratio < 0.45 : ratio < 0.3;
+  st.tip = pts[8];
+  st.ppS = { x: (pts[4].x + pts[8].x) / 2, y: (pts[4].y + pts[8].y) / 2 };
+  const ppW = new THREE.Vector2((world[4].x + world[8].x) / 2, (world[4].y + world[8].y) / 2);
 
-  const prevTip = st.tip;
-  st.tip = lerp2(st.tip, pts[8], 0.6);
-  st.pp = lerp2(st.pp, { x: (pts[4].x + pts[8].x) / 2, y: (pts[4].y + pts[8].y) / 2 }, 0.6);
-  if (!o) return;
-
-  // 집기 시작: 낙서 위에서 집으면 잡기
-  if (st.pinch && !st.prevPinch) {
-    const hit = hitAt(st.pp);
-    if (hit) {
-      const n = camera.getWorldDirection(new THREE.Vector3()).negate();
-      st.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, o.position);
-      st.grab = raycaster.ray.intersectPlane(st.plane, tmpV) ? o.position.clone().sub(tmpV) : new THREE.Vector3();
-      rotVel = 0;
-      if (navigator.vibrate) navigator.vibrate(8);
+  if (st.pinch && !was && doodles[0]) {
+    const margin = phys.grabs.size > 0 ? 0.12 : 0.04;
+    if (phys.grabs.size < 2 && isOnObject(ppW, margin)) {
+      const id = 'h-' + st.key;
+      if (addGrab(id, ppW)) { st.grab = id; buzz(8); }
     }
   }
-  // 놓기
-  if (!st.pinch && st.prevPinch && st.grab) { st.grab = null; bounce(o); }
-  st.prevPinch = st.pinch;
-
-  // 잡은 채 이동
-  if (st.pinch && st.grab && !twoHand) {
-    const v = new THREE.Vector2((st.pp.x / window.innerWidth) * 2 - 1, -(st.pp.y / window.innerHeight) * 2 + 1);
-    raycaster.setFromCamera(v, camera);
-    if (raycaster.ray.intersectPlane(st.plane, tmpV)) o.position.copy(tmpV).add(st.grab);
+  if (!st.pinch && was && st.grab) {
+    removeGrab(st.grab);
+    st.grab = null;
+    st.noCollideUntil = now + 400; // 놓는 순간 손가락에 다시 튕기지 않게
   }
-
-  // 검지 끝: 콕 찌르기 / 쓸어서 회전
-  st.hover = false;
-  if (!st.pinch) {
-    const hit = !!hitAt(st.tip);
-    st.hover = hit;
-    if (hit && !st.wasHit && now - st.lastPoke > 600 && !isGrabbing()) {
-      bounce(o);
-      st.lastPoke = now;
-    }
-    if (hit && prevTip) {
-      const vx = (st.tip.x - prevTip.x) / dt;            // px/s
-      if (Math.abs(vx) > 700) rotVel = clamp(vx * 0.00004, -0.35, 0.35);
-    }
-    st.wasHit = hit;
+  if (st.grab) {
+    const g = phys.grabs.get(st.grab);
+    if (g) g.p.lerp(ppW, 0.7); else st.grab = null;
   }
-}
-
-function isGrabbing() {
-  for (const st of handState.values()) if (st.grab) return true;
-  return false;
-}
-
-function updateTwoHands(pinchers) {
-  const o = doodles[0];
-  if (!o || pinchers.length < 2) { twoHand = null; return; }
-  const d = dist2(pinchers[0].pp, pinchers[1].pp);
-  if (!twoHand) { twoHand = { d0: Math.max(20, d), s0: o.userData.s }; return; }
-  o.userData.s = clamp(twoHand.s0 * d / twoHand.d0, 0.3, 3);
 }
 
 function drawHand(pts, st) {
   hctx.lineWidth = 1.5;
-  hctx.strokeStyle = 'rgba(250,250,250,0.55)';
+  hctx.strokeStyle = st.touch ? 'rgba(250,250,250,0.9)' : 'rgba(250,250,250,0.5)';
   hctx.beginPath();
   for (const [a, b] of HAND_LINKS) { hctx.moveTo(pts[a].x, pts[a].y); hctx.lineTo(pts[b].x, pts[b].y); }
   hctx.stroke();
@@ -1173,127 +1531,18 @@ function drawHand(pts, st) {
   for (const p of pts) { hctx.beginPath(); hctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2); hctx.fill(); }
 
   if (st.pinch) {
-    hctx.fillStyle = st.grab ? 'rgba(250,250,250,0.95)' : 'rgba(250,250,250,0.5)';
-    hctx.beginPath(); hctx.arc(st.pp.x, st.pp.y, st.grab ? 12 : 9, 0, Math.PI * 2); hctx.fill();
-  } else if (st.tip) {
-    hctx.lineWidth = st.hover ? 3 : 1.5;
-    hctx.strokeStyle = st.hover ? 'rgba(250,250,250,1)' : 'rgba(250,250,250,0.7)';
-    hctx.beginPath(); hctx.arc(st.tip.x, st.tip.y, st.hover ? 16 : 12, 0, Math.PI * 2); hctx.stroke();
-  }
-}
-
-const ptrs = new Map();
-let gesture = null, rotVel = 0, lastRotT = 0;
-const dragPlane = new THREE.Plane();
-const tmpV = new THREE.Vector3();
-
-function ndc(e) {
-  const r = renderer.domElement.getBoundingClientRect();
-  return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
-}
-function pairDist() {
-  const [a, b] = [...ptrs.values()];
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function onCamDown(e) {
-  if (mode !== 'camera' || !doodles[0]) return;
-  e.preventDefault();
-  renderer.domElement.setPointerCapture(e.pointerId);
-  ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  const o = doodles[0];
-
-  if (ptrs.size === 1) {
-    raycaster.setFromCamera(ndc(e), camera);
-    const hit = pickDoodle();
-    gesture = { type: hit ? 'move' : 'rotate', sx: e.clientX, sy: e.clientY, lx: e.clientX, t: performance.now(), hit: !!hit, moved: false };
-    rotVel = 0;
-    if (hit) {
-      const n = camera.getWorldDirection(new THREE.Vector3()).negate();
-      dragPlane.setFromNormalAndCoplanarPoint(n, o.position);
-      gesture.off = raycaster.ray.intersectPlane(dragPlane, tmpV) ? o.position.clone().sub(tmpV) : new THREE.Vector3();
-    }
-  } else if (ptrs.size === 2) {
-    gesture = { type: 'pinch', d0: Math.max(1, pairDist()), s0: o.userData.s };
-  }
-}
-
-function onCamMove(e) {
-  const p = ptrs.get(e.pointerId);
-  if (!p) return;
-  p.x = e.clientX; p.y = e.clientY;
-  if (!gesture) return;
-  const o = doodles[0];
-
-  if (gesture.type === 'pinch') {
-    if (ptrs.size >= 2) o.userData.s = clamp(gesture.s0 * pairDist() / gesture.d0, 0.3, 3);
-    return;
-  }
-  if (Math.hypot(e.clientX - gesture.sx, e.clientY - gesture.sy) > 6) gesture.moved = true;
-  if (!gesture.moved) return;
-
-  if (gesture.type === 'rotate') {
-    const dx = e.clientX - gesture.lx;
-    o.rotation.y += dx * 0.012;
-    rotVel = dx * 0.012;
-    lastRotT = performance.now();
-    gesture.lx = e.clientX;
-  } else if (gesture.type === 'move') {
-    raycaster.setFromCamera(ndc(e), camera);
-    if (raycaster.ray.intersectPlane(dragPlane, tmpV)) o.position.copy(tmpV).add(gesture.off);
-  }
-}
-
-function onCamUp(e) {
-  if (!ptrs.has(e.pointerId)) return;
-  ptrs.delete(e.pointerId);
-  if (gesture && gesture.type !== 'pinch' && !gesture.moved && gesture.hit && performance.now() - gesture.t < 400) {
-    bounce(doodles[0]);
-  }
-  if (gesture && gesture.type === 'rotate' && performance.now() - lastRotT > 80) rotVel = 0;
-  if (ptrs.size === 0 || (gesture && gesture.type === 'pinch')) gesture = null;
-}
-
-function onCamWheel(e) {
-  if (mode !== 'camera' || !doodles[0]) return;
-  e.preventDefault();
-  const u = doodles[0].userData;
-  u.s = clamp(u.s * Math.exp(-e.deltaY * 0.0015), 0.3, 3);
-}
-
-function applyInertia(dt) {
-  if (!doodles[0] || (gesture && gesture.type === 'rotate')) return;
-  if (Math.abs(rotVel) < 0.0002) { rotVel = 0; return; }
-  doodles[0].rotation.y += rotVel;
-  rotVel *= Math.pow(0.92, dt * 60);
-}
-
-function capture() {
-  if (mode !== 'camera') return;
-  const W = renderer.domElement.width, H = renderer.domElement.height;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = H;
-  const x = c.getContext('2d');
-  if (stream && video.videoWidth) {
-    const vr = video.videoWidth / video.videoHeight, cr = W / H;
-    let sw, sh, sx, sy;
-    if (vr > cr) { sh = video.videoHeight; sw = sh * cr; sx = (video.videoWidth - sw) / 2; sy = 0; }
-    else { sw = video.videoWidth; sh = sw / cr; sx = 0; sy = (video.videoHeight - sh) / 2; }
-    x.save();
-    if (mirrored) { x.translate(W, 0); x.scale(-1, 1); }
-    x.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
-    x.restore();
+    hctx.fillStyle = st.grab ? 'rgba(250,250,250,0.95)' : 'rgba(250,250,250,0.45)';
+    hctx.beginPath(); hctx.arc(st.ppS.x, st.ppS.y, st.grab ? 12 : 9, 0, Math.PI * 2); hctx.fill();
   } else {
-    x.fillStyle = '#111113';
-    x.fillRect(0, 0, W, H);
+    hctx.lineWidth = st.touch ? 3 : 1.5;
+    hctx.strokeStyle = st.touch ? 'rgba(250,250,250,1)' : 'rgba(250,250,250,0.7)';
+    hctx.beginPath(); hctx.arc(st.tip.x, st.tip.y, st.touch ? 16 : 12, 0, Math.PI * 2); hctx.stroke();
   }
-  renderer.render(scene, camera);
-  x.drawImage(renderer.domElement, 0, 0);
-  download(c.toDataURL('image/png'), 'doodle-ar.png');
-  toast('캡처 이미지를 저장했습니다');
 }
 
-/* ---- WebXR immersive-ar mode (Android Chrome 등) ---- */
+/* =====================================================================
+   5. WebXR immersive-ar (Android Chrome — 바닥 배치)
+   ===================================================================== */
 async function startXR() {
   arEl.className = 'open xr';
   arEl.setAttribute('aria-hidden', 'false');
@@ -1381,7 +1630,7 @@ function onXRSelectStart() {
   }
   if (!reticle.visible) return;
   if (doodles.length >= 12) scene.remove(doodles.shift());
-  const o = makeDoodle();
+  const o = makeDoodle(false);
   o.position.setFromMatrixPosition(reticle.matrix);
   faceCamera(o);
   scene.add(o);
