@@ -86,7 +86,11 @@
   #ar canvas.gl{touch-action:none}
   #ar.nocam video{display:none}
   #ar.xr{background:transparent}
-  #ar.xr video,#ar.xr canvas.gl{visibility:hidden}
+  #ar.xr video,#ar.xr canvas.gl,#ar.xr #hands{visibility:hidden}
+  #ar.mirror video{transform:scaleX(-1)}
+  #hands{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  .ar-top .right{display:flex;gap:8px;align-items:center}
+  .chip[aria-pressed="true"]{background:rgba(250,250,250,.92);color:#09090b}
   #arUI{position:absolute;inset:0;pointer-events:none}
   .ar-top{
     position:absolute;left:12px;right:12px;top:max(12px,env(safe-area-inset-top));
@@ -188,16 +192,28 @@
 
 <div id="ar" aria-hidden="true">
   <video id="cam" playsinline muted autoplay></video>
+  <canvas id="hands"></canvas>
   <div id="arUI">
     <div class="ar-top">
       <button class="chip icon" id="arClose" aria-label="드로잉으로 돌아가기">
         <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
-      <span class="chip badge" id="arMode">Camera</span>
+      <div class="right">
+        <span class="chip badge" id="arMode">Camera</span>
+        <button class="chip icon" id="arFlip" aria-label="전면/후면 카메라 전환" hidden>
+          <svg viewBox="0 0 24 24"><path d="M4 9a2 2 0 0 1 2-2h1.5L9 5h6l1.5 2H18a2 2 0 0 1 2 2v1"/><path d="M20 15a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-1"/><path d="m17 12 3-2 1 3"/><path d="m7 12-3 2-1-3"/></svg>
+        </button>
+      </div>
     </div>
     <div class="ar-bottom">
       <p class="hint" id="arHint"></p>
       <div class="ar-actions">
+        <button class="chip" id="arHands" aria-pressed="true" hidden>
+          <svg viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-6-2.4l-3.6-3.6a2 2 0 0 1 2.8-2.8L7 15"/></svg><span>손 인식</span>
+        </button>
+        <button class="chip" id="arXR" hidden>
+          <svg viewBox="0 0 24 24"><path d="M3 17l9 4 9-4"/><path d="M3 12l9 4 9-4"/><path d="m3 7 9-4 9 4-9 4Z"/></svg>바닥 배치 AR
+        </button>
         <button class="chip" id="arReset">
           <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>초기화
         </button>
@@ -600,7 +616,7 @@ function initThree() {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.xr.enabled = true;
   renderer.domElement.className = 'gl';
-  arEl.insertBefore(renderer.domElement, $('#arUI'));
+  arEl.insertBefore(renderer.domElement, $('#hands'));
 
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 50);
@@ -769,7 +785,10 @@ function loop(time, frame) {
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.elapsedTime;
   if (frame && mode === 'xr') xrUpdate(frame);
-  if (mode === 'camera') applyInertia(dt);
+  if (mode === 'camera') {
+    if (handEnabled && handLandmarker && stream) processHands();
+    applyInertia(dt);
+  }
   for (const o of doodles) updateDoodle(o, dt, t);
   renderer.render(scene, camera);
 }
@@ -783,14 +802,8 @@ async function openAR() {
   btn.disabled = true;
   try {
     await buildAsset(ex);
-    if (xrSupported) {
-      try { await startXR(); return; }
-      catch (err) {
-        console.warn(err);
-        arEl.classList.remove('open', 'xr');
-        toast('WebXR을 시작할 수 없어 카메라 모드로 전환합니다');
-      }
-    }
+    // 손 인식은 카메라 영상에 직접 접근해야 하므로 카메라 모드가 기본.
+    // WebXR(바닥 배치)은 AR 화면의 '바닥 배치 AR' 버튼으로 전환.
     await startCameraMode();
   } finally {
     btn.disabled = false;
@@ -808,6 +821,7 @@ function teardown() {
   if (stream) { stream.getTracks().forEach((tr) => tr.stop()); stream = null; }
   video.srcObject = null;
   clearDoodles();
+  clearHands();
   if (reticle) reticle.visible = false;
   hitSource = transientSource = xrDrag = null;
   mode = null;
@@ -832,6 +846,31 @@ $('#arReset').addEventListener('click', () => {
   }
 });
 $('#arShot').addEventListener('click', capture);
+$('#arFlip').addEventListener('click', async () => {
+  if (mode !== 'camera') return;
+  facing = facing === 'environment' ? 'user' : 'environment';
+  try { await startStream(); }
+  catch (err) { console.warn(err); toast('다른 카메라를 사용할 수 없습니다'); facing = facing === 'environment' ? 'user' : 'environment'; }
+});
+$('#arHands').addEventListener('click', () => {
+  if (mode === 'xr') {           // WebXR → 손 인식 카메라 모드로 복귀
+    switchToHands = true;
+    const s = renderer.xr.getSession();
+    if (s) s.end();
+    return;
+  }
+  setHandEnabled(!handEnabled);
+});
+$('#arXR').addEventListener('click', async () => {
+  if (mode !== 'camera') return;
+  stopCamera();
+  try { await startXR(); }
+  catch (err) {
+    console.warn(err);
+    toast('WebXR을 시작할 수 없습니다');
+    await startCameraMode();
+  }
+});
 // WebXR dom-overlay: UI 버튼 탭이 3D select로 새지 않게
 $$('.ar-top, .ar-actions').forEach((el) => el.addEventListener('beforexrselect', (e) => e.preventDefault()));
 
@@ -865,6 +904,7 @@ async function startCameraMode() {
   arEl.setAttribute('aria-hidden', 'false');
   $('#arMode').textContent = 'Camera';
   $('#arShot').hidden = false;
+  $('#arXR').hidden = !xrSupported;
   grid.visible = false;
 
   camera.fov = 50;
@@ -873,12 +913,7 @@ async function startCameraMode() {
   onResize();
 
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: false,
-    });
-    video.srcObject = stream;
-    await video.play();
+    await startStream();
   } catch (err) {
     console.warn(err);
     arEl.classList.add('nocam');
@@ -886,17 +921,265 @@ async function startCameraMode() {
     toast('카메라를 사용할 수 없어 3D 미리보기로 표시합니다');
   }
   if (mode !== 'camera') return;
+  $('#arFlip').hidden = !stream;
+  $('#arHands').hidden = !stream;
 
   clearDoodles();
   const o = makeDoodle();
   scene.add(o);
   doodles.push(o);
-  setHint('탭: 튀어오르기 · 드래그: 회전(빈 곳) / 이동(낙서) · 핀치: 크기');
   clock.getDelta();
   renderer.setAnimationLoop(loop);
   setTimeout(() => bounce(o), 350);
 
+  if (stream && handEnabled) setHandEnabled(true);
+  else updateHandUI();
+
   if (isIOS) prepareQuickLook();
+}
+
+let facing = 'environment';
+let mirrored = false;
+
+async function startStream() {
+  const next = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false,
+  });
+  if (stream) stream.getTracks().forEach((tr) => tr.stop());
+  stream = next;
+  video.srcObject = stream;
+  await video.play();
+  // 전면(셀카)·노트북 웹캠은 거울처럼 좌우 반전해서 보여줘야 손 움직임이 자연스럽다
+  const fm = stream.getVideoTracks()[0].getSettings().facingMode;
+  mirrored = fm !== 'environment';
+  arEl.classList.toggle('mirror', mirrored);
+  lastVideoTime = -1;
+  clearHands();
+}
+
+function stopCamera() {
+  renderer.setAnimationLoop(null);
+  if (stream) { stream.getTracks().forEach((tr) => tr.stop()); stream = null; }
+  video.srcObject = null;
+  clearDoodles();
+  clearHands();
+}
+
+/* =====================================================================
+   3. HAND TRACKING (MediaPipe Hand Landmarker)
+   - 검지로 콕 찌르기 → 튀어오르기
+   - 검지로 빠르게 쓸기 → 회전
+   - 엄지+검지 집기 → 잡아서 이동
+   - 양손 집기 → 벌리고 좁혀 크기 조절
+   ===================================================================== */
+const MP_VER = '0.10.14';
+const MP_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}`;
+const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+const HAND_HINT = '검지로 콕: 튀어오르기 · 빠르게 쓸기: 회전 · 엄지+검지 집기: 잡아 옮기기 · 양손 집기: 크기';
+const TOUCH_HINT = '탭: 튀어오르기 · 드래그: 회전(빈 곳) / 이동(낙서) · 핀치: 크기';
+const HAND_LINKS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
+
+const handsCvs = $('#hands');
+const hctx = handsCvs.getContext('2d');
+let handLandmarker = null, handLoading = null, handEnabled = true, lastVideoTime = -1;
+let switchToHands = false;
+const handState = new Map();
+let twoHand = null;
+
+function loadHands() {
+  if (handLandmarker) return Promise.resolve(handLandmarker);
+  if (!handLoading) {
+    handLoading = (async () => {
+      const { FilesetResolver, HandLandmarker } = await import(`${MP_BASE}/vision_bundle.mjs`);
+      const files = await FilesetResolver.forVisionTasks(`${MP_BASE}/wasm`);
+      const opts = (delegate) => ({
+        baseOptions: { modelAssetPath: HAND_MODEL, delegate },
+        runningMode: 'VIDEO', numHands: 2,
+        minHandDetectionConfidence: 0.6, minHandPresenceConfidence: 0.6, minTrackingConfidence: 0.5,
+      });
+      try { handLandmarker = await HandLandmarker.createFromOptions(files, opts('GPU')); }
+      catch { handLandmarker = await HandLandmarker.createFromOptions(files, opts('CPU')); }
+      return handLandmarker;
+    })().catch((err) => { handLoading = null; throw err; });
+  }
+  return handLoading;
+}
+
+function updateHandUI(label) {
+  const btn = $('#arHands');
+  const span = btn.querySelector('span');
+  if (mode === 'xr') {
+    btn.setAttribute('aria-pressed', 'false');
+    span.textContent = '손 인식 모드';
+    return;
+  }
+  btn.setAttribute('aria-pressed', String(handEnabled));
+  span.textContent = label || (handEnabled ? '손 인식 켜짐' : '손 인식 꺼짐');
+  setHint(handEnabled && handLandmarker ? HAND_HINT : TOUCH_HINT);
+}
+
+async function setHandEnabled(on) {
+  handEnabled = on;
+  if (!on) { clearHands(); updateHandUI(); return; }
+  if (!handLandmarker) {
+    updateHandUI('손 인식 준비 중…');
+    toast('손 인식 모델을 불러오는 중입니다');
+    try { await loadHands(); toast('카메라에 손을 비춰 보세요'); }
+    catch (err) {
+      console.warn(err);
+      handEnabled = false;
+      toast('손 인식 모델을 불러오지 못했습니다');
+    }
+  }
+  if (mode === 'camera') updateHandUI();
+}
+
+function clearHands() {
+  hctx.setTransform(1, 0, 0, 1, 0, 0);
+  hctx.clearRect(0, 0, handsCvs.width, handsCvs.height);
+  handState.clear();
+  twoHand = null;
+}
+
+const dist2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const lerp2 = (a, b, k) => (a ? { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k } : { ...b });
+
+function hitAt(p) {
+  const v = new THREE.Vector2((p.x / window.innerWidth) * 2 - 1, -(p.y / window.innerHeight) * 2 + 1);
+  raycaster.setFromCamera(v, camera);
+  return pickDoodle();
+}
+
+function processHands() {
+  if (video.readyState < 2 || !video.videoWidth) return;
+  const W = window.innerWidth, H = window.innerHeight;
+  const hd = Math.min(window.devicePixelRatio || 1, 2);
+  if (handsCvs.width !== Math.round(W * hd) || handsCvs.height !== Math.round(H * hd)) {
+    handsCvs.width = Math.round(W * hd);
+    handsCvs.height = Math.round(H * hd);
+  }
+  if (video.currentTime === lastVideoTime) return; // 새 프레임이 있을 때만 추론
+  lastVideoTime = video.currentTime;
+
+  let res;
+  try { res = handLandmarker.detectForVideo(video, performance.now()); }
+  catch (err) { console.warn(err); return; }
+
+  // 영상(object-fit: cover) 좌표 → 화면 좌표
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const sc = Math.max(W / vw, H / vh);
+  const dw = vw * sc, dh = vh * sc, ox = (W - dw) / 2, oy = (H - dh) / 2;
+  const toScreen = (l) => {
+    let x = ox + l.x * dw;
+    if (mirrored) x = W - x;
+    return { x, y: oy + l.y * dh };
+  };
+
+  hctx.setTransform(hd, 0, 0, hd, 0, 0);
+  hctx.clearRect(0, 0, W, H);
+
+  const now = performance.now();
+  const seen = new Set();
+  const pinchers = [];
+  (res.landmarks || []).forEach((lm, i) => {
+    let key = (res.handedness && res.handedness[i] && res.handedness[i][0] && res.handedness[i][0].categoryName) || 'hand';
+    if (seen.has(key)) key += i;
+    seen.add(key);
+    const pts = lm.map(toScreen);
+    let st = handState.get(key);
+    if (!st) { st = { pinch: false, prevPinch: false, grab: null, wasHit: false, lastPoke: 0, t: now }; handState.set(key, st); }
+    updateHand(st, pts, now);
+    drawHand(pts, st);
+    if (st.pinch) pinchers.push(st);
+  });
+  for (const [k, st] of handState) if (!seen.has(k)) { st.grab = null; handState.delete(k); }
+  updateTwoHands(pinchers);
+}
+
+function updateHand(st, pts, now) {
+  const o = doodles[0];
+  const dt = Math.max(1, now - st.t) / 1000;
+  st.t = now;
+
+  const size = dist2(pts[0], pts[9]) || 1;               // 손 크기 기준으로 정규화
+  const ratio = dist2(pts[4], pts[8]) / size;
+  st.pinch = st.pinch ? ratio < 0.45 : ratio < 0.3;      // 히스테리시스로 떨림 방지
+
+  const prevTip = st.tip;
+  st.tip = lerp2(st.tip, pts[8], 0.6);
+  st.pp = lerp2(st.pp, { x: (pts[4].x + pts[8].x) / 2, y: (pts[4].y + pts[8].y) / 2 }, 0.6);
+  if (!o) return;
+
+  // 집기 시작: 낙서 위에서 집으면 잡기
+  if (st.pinch && !st.prevPinch) {
+    const hit = hitAt(st.pp);
+    if (hit) {
+      const n = camera.getWorldDirection(new THREE.Vector3()).negate();
+      st.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, o.position);
+      st.grab = raycaster.ray.intersectPlane(st.plane, tmpV) ? o.position.clone().sub(tmpV) : new THREE.Vector3();
+      rotVel = 0;
+      if (navigator.vibrate) navigator.vibrate(8);
+    }
+  }
+  // 놓기
+  if (!st.pinch && st.prevPinch && st.grab) { st.grab = null; bounce(o); }
+  st.prevPinch = st.pinch;
+
+  // 잡은 채 이동
+  if (st.pinch && st.grab && !twoHand) {
+    const v = new THREE.Vector2((st.pp.x / window.innerWidth) * 2 - 1, -(st.pp.y / window.innerHeight) * 2 + 1);
+    raycaster.setFromCamera(v, camera);
+    if (raycaster.ray.intersectPlane(st.plane, tmpV)) o.position.copy(tmpV).add(st.grab);
+  }
+
+  // 검지 끝: 콕 찌르기 / 쓸어서 회전
+  st.hover = false;
+  if (!st.pinch) {
+    const hit = !!hitAt(st.tip);
+    st.hover = hit;
+    if (hit && !st.wasHit && now - st.lastPoke > 600 && !isGrabbing()) {
+      bounce(o);
+      st.lastPoke = now;
+    }
+    if (hit && prevTip) {
+      const vx = (st.tip.x - prevTip.x) / dt;            // px/s
+      if (Math.abs(vx) > 700) rotVel = clamp(vx * 0.00004, -0.35, 0.35);
+    }
+    st.wasHit = hit;
+  }
+}
+
+function isGrabbing() {
+  for (const st of handState.values()) if (st.grab) return true;
+  return false;
+}
+
+function updateTwoHands(pinchers) {
+  const o = doodles[0];
+  if (!o || pinchers.length < 2) { twoHand = null; return; }
+  const d = dist2(pinchers[0].pp, pinchers[1].pp);
+  if (!twoHand) { twoHand = { d0: Math.max(20, d), s0: o.userData.s }; return; }
+  o.userData.s = clamp(twoHand.s0 * d / twoHand.d0, 0.3, 3);
+}
+
+function drawHand(pts, st) {
+  hctx.lineWidth = 1.5;
+  hctx.strokeStyle = 'rgba(250,250,250,0.55)';
+  hctx.beginPath();
+  for (const [a, b] of HAND_LINKS) { hctx.moveTo(pts[a].x, pts[a].y); hctx.lineTo(pts[b].x, pts[b].y); }
+  hctx.stroke();
+  hctx.fillStyle = 'rgba(250,250,250,0.8)';
+  for (const p of pts) { hctx.beginPath(); hctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2); hctx.fill(); }
+
+  if (st.pinch) {
+    hctx.fillStyle = st.grab ? 'rgba(250,250,250,0.95)' : 'rgba(250,250,250,0.5)';
+    hctx.beginPath(); hctx.arc(st.pp.x, st.pp.y, st.grab ? 12 : 9, 0, Math.PI * 2); hctx.fill();
+  } else if (st.tip) {
+    hctx.lineWidth = st.hover ? 3 : 1.5;
+    hctx.strokeStyle = st.hover ? 'rgba(250,250,250,1)' : 'rgba(250,250,250,0.7)';
+    hctx.beginPath(); hctx.arc(st.tip.x, st.tip.y, st.hover ? 16 : 12, 0, Math.PI * 2); hctx.stroke();
+  }
 }
 
 const ptrs = new Map();
@@ -996,7 +1279,10 @@ function capture() {
     let sw, sh, sx, sy;
     if (vr > cr) { sh = video.videoHeight; sw = sh * cr; sx = (video.videoWidth - sw) / 2; sy = 0; }
     else { sw = video.videoWidth; sh = sw / cr; sx = 0; sy = (video.videoHeight - sh) / 2; }
+    x.save();
+    if (mirrored) { x.translate(W, 0); x.scale(-1, 1); }
     x.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
+    x.restore();
   } else {
     x.fillStyle = '#111113';
     x.fillRect(0, 0, W, H);
@@ -1013,6 +1299,10 @@ async function startXR() {
   arEl.setAttribute('aria-hidden', 'false');
   $('#arMode').textContent = 'WebXR';
   $('#arShot').hidden = true;
+  $('#arFlip').hidden = true;
+  $('#arXR').hidden = true;
+  $('#qlLink').hidden = true;
+  $('#arHands').hidden = false;
   grid.visible = false;
 
   const session = await navigator.xr.requestSession('immersive-ar', {
@@ -1035,8 +1325,10 @@ async function startXR() {
   session.addEventListener('end', () => {
     if (hitSource) { try { hitSource.cancel(); } catch {} }
     teardown();
+    if (switchToHands) { switchToHands = false; startCameraMode(); }
   });
 
+  updateHandUI();
   clearDoodles();
   setHint('바닥을 천천히 비춰 주세요');
   clock.getDelta();
