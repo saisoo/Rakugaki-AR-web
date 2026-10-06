@@ -211,6 +211,9 @@
         <button class="chip" id="arHands" aria-pressed="true" hidden>
           <svg viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-6-2.4l-3.6-3.6a2 2 0 0 1 2.8-2.8L7 15"/></svg><span>손 인식</span>
         </button>
+        <button class="chip" id="arBounce" aria-pressed="true" hidden>
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="7" r="4"/><path d="M4 21h16"/><path d="M12 11v4"/><path d="m9 18 3-3 3 3"/></svg><span>튕기기 켜짐</span>
+        </button>
         <button class="chip" id="arXR" hidden>
           <svg viewBox="0 0 24 24"><path d="M3 17l9 4 9-4"/><path d="M3 12l9 4 9-4"/><path d="m3 7 9-4 9 4-9 4Z"/></svg>바닥 배치 AR
         </button>
@@ -794,7 +797,8 @@ function pickDoodle() {
 const PH = {
   G: 4.2,          // 중력 (m/s²) — 실제보다 약간 낮춰 둥실한 느낌
   REST: 0.55,      // 바닥·벽 반발 계수
-  HAND_REST: 0.8,  // 손과 부딪힐 때 반발 계수
+  HAND_REST: 0.6,  // 손과 부딪힐 때 반발 계수
+  HIT_SPEED: 0.6,  // 이보다 느린 손은 '치기'가 아니라 살짝 미는 것으로 처리 (m/s)
   AIR: 0.35,       // 공기 저항
   UPRIGHT: 9,      // 오뚝이처럼 바로 서려는 힘
   ANG_DAMP: 1.6,
@@ -808,6 +812,7 @@ const phys = {
   def: { axis: 0, s: 1, sv: 0, target: 1 },
   grabs: new Map(), stretch: null, lastBuzz: 0,
 };
+let bounceEnabled = true;
 const wrapA = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 
 function screenToPlane(x, y, out) {
@@ -916,7 +921,7 @@ function physStep(dt) {
     const prev = P.ang;
     P.ang += wrapA(target - P.ang) * Math.min(1, dt * 18);
     P.w = (P.ang - prev) / dt;
-    const ns = clamp(a.distanceTo(b) / P.stretch.d0, 0.4, 3.2);
+    const ns = clamp(a.distanceTo(b) / P.stretch.d0, 0.4, 4);
     D.sv = (ns - D.s) / dt;
     D.s = ns;
     D.axis = angW - P.ang;
@@ -947,7 +952,7 @@ function physStep(dt) {
     P.ang += P.w * dt;
     const acc = -PH.DEF_K * (D.s - D.target) - PH.DEF_C * D.sv;
     D.sv += acc * dt;
-    D.s = clamp(D.s + D.sv * dt, 0.4, 3.2);
+    D.s = clamp(D.s + D.sv * dt, 0.4, 4);
   }
   collideBounds(hx, hy, dt);
 }
@@ -986,13 +991,13 @@ function collideBounds(hx, hy, dt) {
 
 // 손 관절 21개를 작은 원 콜라이더로 보고 오브젝트(회전된 상자)와 충돌 처리
 function handCollide() {
-  if (phys.stretch || !asset) return;
+  if (!bounceEnabled || phys.stretch || phys.grabs.size || !asset) return; // 잡고 있는 동안엔 다른 손에 튕기지 않음
   const { hx, hy } = halfExt();
   const I = (hx * hx + hy * hy) / 3;
   const now = performance.now();
   for (const st of handState.values()) {
     st.touch = false;
-    if (!st.world || st.grab || now < st.noCollideUntil) continue;
+    if (!st.world || st.grab || st.ready || now < st.noCollideUntil) continue; // 집으려는 손은 통과
     for (let i = 0; i < 21; i++) {
       if (contact(st.world[i], st.vel[i], HAND_R[i], hx, hy, I)) st.touch = true;
     }
@@ -1013,6 +1018,8 @@ function contact(p, vp, R, hx, hy, I) {
     if (px < py) { nx = Math.sign(l.x) || 1; ny = 0; pen = px + R; }
     else { nx = 0; ny = Math.sign(l.y) || 1; pen = py + R; }
   }
+  const soft = vp.length() < PH.HIT_SPEED;            // 느린 손: 튕기지 않고 살짝 밀기
+  if (soft) pen *= 0.35;
   const c = Math.cos(P.ang), s = Math.sin(P.ang);
   const wx = nx * c - ny * s, wy = nx * s + ny * c;   // 오브젝트 → 손 방향 법선
   P.c.x -= wx * pen; P.c.y -= wy * pen;               // 겹친 만큼 밀어내기
@@ -1020,7 +1027,7 @@ function contact(p, vp, R, hx, hy, I) {
   const rvx = P.v.x - vp.x, rvy = P.v.y - vp.y;
   const vn = rvx * wx + rvy * wy;                     // 손 쪽으로 다가가는 상대 속도
   if (vn > 0) {
-    const j = (1 + PH.HAND_REST) * vn;
+    const j = soft ? vn * 0.5 : (1 + PH.HAND_REST) * vn;
     P.v.x -= j * wx; P.v.y -= j * wy;
     const rx = qx * c - qy * s, ry = qx * s + qy * c; // 접촉점(중심 기준)
     P.w += (rx * (-j * wy) - ry * (-j * wx)) / I * 0.6;
@@ -1029,8 +1036,8 @@ function contact(p, vp, R, hx, hy, I) {
     const vt = (vp.x - P.v.x) * tx + (vp.y - P.v.y) * ty;
     P.v.x += tx * vt * 0.25; P.v.y += ty * vt * 0.25;
     P.w += (rx * ty - ry * tx) * vt * 0.25 / I;
-    if (j > 0.4) squash(Math.atan2(wy, wx), j * 0.5);
-    if (j > 0.8) buzz(10);
+    if (!soft && j > 0.4) squash(Math.atan2(wy, wx), j * 0.5);
+    if (!soft && j > 0.8) buzz(10);
   }
   return true;
 }
@@ -1144,6 +1151,13 @@ $('#arHands').addEventListener('click', () => {
   }
   setHandEnabled(!handEnabled);
 });
+$('#arBounce').addEventListener('click', () => {
+  bounceEnabled = !bounceEnabled;
+  const b = $('#arBounce');
+  b.setAttribute('aria-pressed', String(bounceEnabled));
+  b.querySelector('span').textContent = bounceEnabled ? '튕기기 켜짐' : '튕기기 꺼짐';
+  toast(bounceEnabled ? '손으로 쳐서 튕길 수 있습니다' : '튕기기를 껐습니다 — 잡고 늘리기에 집중');
+});
 $('#arXR').addEventListener('click', async () => {
   if (mode !== 'camera') return;
   stopCamera();
@@ -1206,6 +1220,7 @@ async function startCameraMode() {
   if (mode !== 'camera') return;
   $('#arFlip').hidden = !stream;
   $('#arHands').hidden = !stream;
+  $('#arBounce').hidden = !stream;
 
   clearDoodles();
   const o = makeDoodle(true);
@@ -1269,7 +1284,7 @@ function onCamDown(e) {
   const rec = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, lx: e.clientX, t: performance.now(), moved: false, grab: false };
   ptrs.set(e.pointerId, rec);
   const pw = ptrWorld(e);
-  const margin = phys.grabs.size > 0 ? 0.15 : 0.02;
+  const margin = phys.grabs.size > 0 ? 0.25 : 0.02;
   if (pw && phys.grabs.size < 2 && isOnObject(pw, margin) && addGrab('p' + e.pointerId, pw)) {
     rec.grab = true;
     gesture = null;
@@ -1461,7 +1476,7 @@ function processHands() {
     seen.add(key);
     let st = handState.get(key);
     if (!st) {
-      st = { key, pinch: false, grab: null, noCollideUntil: 0, t: now, world: null, vel: null, touch: false };
+      st = { key, pinch: false, ready: false, openFrames: 0, grab: null, noCollideUntil: 0, t: now, world: null, vel: null, touch: false };
       handState.set(key, st);
     }
     const pts = lm.map(toScreen);
@@ -1469,7 +1484,7 @@ function processHands() {
     drawHand(pts, st);
   });
   for (const [k, st] of handState) {
-    if (!seen.has(k)) { if (st.grab) removeGrab(st.grab); handState.delete(k); }
+    if (!seen.has(k) && now - st.t > 250) { if (st.grab) removeGrab(st.grab); handState.delete(k); }
   }
 }
 
@@ -1498,13 +1513,17 @@ function updateHand(st, pts, now) {
   const size = dist2(pts[0], pts[9]) || 1;
   const ratio = dist2(pts[4], pts[8]) / size;
   const was = st.pinch;
-  st.pinch = was ? ratio < 0.45 : ratio < 0.3;
+  if (!was) { st.pinch = ratio < 0.3; st.openFrames = 0; }
+  else if (ratio >= 0.45) { st.openFrames = (st.openFrames || 0) + 1; st.pinch = st.openFrames < 3; } // 2프레임 떨림은 무시
+  else st.openFrames = 0;
+  // 검지를 편 채 엄지와 가까워지는 중 = 집으려는 손 → 충돌 끔 (주먹은 계속 충돌)
+  st.ready = st.pinch || (ratio < 0.65 && dist2(pts[8], pts[0]) / size > 1.3);
   st.tip = pts[8];
   st.ppS = { x: (pts[4].x + pts[8].x) / 2, y: (pts[4].y + pts[8].y) / 2 };
   const ppW = new THREE.Vector2((world[4].x + world[8].x) / 2, (world[4].y + world[8].y) / 2);
 
   if (st.pinch && !was && doodles[0]) {
-    const margin = phys.grabs.size > 0 ? 0.12 : 0.04;
+    const margin = phys.grabs.size > 0 ? 0.22 : 0.08;
     if (phys.grabs.size < 2 && isOnObject(ppW, margin)) {
       const id = 'h-' + st.key;
       if (addGrab(id, ppW)) { st.grab = id; buzz(8); }
@@ -1552,6 +1571,7 @@ async function startXR() {
   $('#arXR').hidden = true;
   $('#qlLink').hidden = true;
   $('#arHands').hidden = false;
+  $('#arBounce').hidden = true;
   grid.visible = false;
 
   const session = await navigator.xr.requestSession('immersive-ar', {
