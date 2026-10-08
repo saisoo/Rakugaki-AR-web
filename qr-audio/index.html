@@ -3,134 +3,94 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QR 오디오 가이드</title>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<title>QR 오디오</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
   body {
     font-family: -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
     background: #111; color: #fff;
-    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
-    padding: 24px 16px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px 16px; text-align: center;
   }
-  h1 { font-size: 22px; margin-bottom: 8px; }
-  .sub { color: #aaa; font-size: 14px; margin-bottom: 20px; text-align: center; }
-  #reader { width: 100%; max-width: 400px; border-radius: 12px; overflow: hidden; }
-  button {
-    font-size: 18px; font-weight: 600; padding: 16px 32px; border: none;
-    border-radius: 999px; background: #ffcc00; color: #111; cursor: pointer; margin: 12px 0;
+  .title { font-size: 26px; font-weight: 700; margin-bottom: 24px; word-break: keep-all; }
+  .icon {
+    width: 140px; height: 140px; border-radius: 50%; background: #ffcc00; color: #111;
+    display: flex; align-items: center; justify-content: center; font-size: 56px;
+    margin-bottom: 20px; cursor: pointer; user-select: none;
   }
-  button:active { transform: scale(0.97); }
-  #now {
-    width: 100%; max-width: 400px; margin-top: 16px; padding: 16px;
-    background: #222; border-radius: 12px; text-align: center; display: none;
+  .icon:active { transform: scale(0.96); }
+  .hint { color: #aaa; font-size: 15px; min-height: 22px; }
+  audio { width: 100%; max-width: 400px; margin-top: 24px; }
+  /* 자동재생이 막혔을 때: 화면 아무 데나 누르면 재생 */
+  #tapLayer { position: fixed; inset: 0; display: none; cursor: pointer; }
+  ul { list-style: none; width: 100%; max-width: 400px; }
+  li a {
+    display: block; padding: 16px; margin: 8px 0; background: #222; border-radius: 12px;
+    color: #fff; text-decoration: none; font-size: 17px;
   }
-  #now .title { font-size: 20px; font-weight: 700; margin-bottom: 10px; }
-  #status { margin-top: 12px; color: #aaa; font-size: 14px; text-align: center; min-height: 20px; }
-  audio { width: 100%; }
 </style>
 </head>
 <body>
 
-<h1>🎧 QR 오디오 가이드</h1>
-<p class="sub">버튼을 누른 뒤 QR코드를 카메라에 비추면 소리가 재생돼요</p>
-
-<button id="startBtn">스캔 시작</button>
-<div id="reader"></div>
-
-<div id="now">
-  <div class="title" id="nowTitle"></div>
-  <audio id="player" controls playsinline></audio>
-</div>
-
-<p id="status"></p>
+<div id="main"></div>
+<div id="tapLayer"></div>
 
 <script>
 // ============================================================
 // ✏️ 여기만 수정하세요!
-// 왼쪽: QR코드에 넣을 글자 / file: 같은 폴더에 올린 mp3 파일 이름 / title: 화면에 보일 제목
+// 왼쪽: 주소 끝에 붙을 이름 (?t=track01) / file: 같은 폴더에 올린 mp3 파일 이름 / title: 화면 제목
 // ============================================================
 const TRACKS = {
-  "track01": { file: "track01.mp3", title: "1번 작품 해설" },
-  "track02": { file: "track02.mp3", title: "2번 작품 해설" },
-  "track03": { file: "track03.mp3", title: "3번 작품 해설" },
+  "track01": { file: "track01.mp3", title: "1번 노래" },
+  "track02": { file: "track02.mp3", title: "2번 노래" },
+  "track03": { file: "track03.mp3", title: "3번 노래" },
 };
 // ============================================================
 
-const player   = document.getElementById("player");
-const startBtn = document.getElementById("startBtn");
-const nowBox   = document.getElementById("now");
-const nowTitle = document.getElementById("nowTitle");
-const statusEl = document.getElementById("status");
+const main = document.getElementById("main");
+const tapLayer = document.getElementById("tapLayer");
+const code = new URLSearchParams(location.search).get("t");
+const track = TRACKS[code];
 
-let lastCode = "";
-let lastTime = 0;
+if (!track) {
+  // 주소에 곡 이름이 없으면 전체 목록을 보여줌
+  main.innerHTML = '<p class="title">🎧 곡 목록</p><ul>' +
+    Object.entries(TRACKS).map(([k, t]) =>
+      `<li><a href="?t=${k}">▶ ${t.title}</a></li>`).join("") + "</ul>";
+} else {
+  main.innerHTML = `
+    <p class="title">${track.title}</p>
+    <div class="icon" id="icon">▶</div>
+    <p class="hint" id="hint">불러오는 중...</p>
+    <audio id="player" src="${track.file}" controls playsinline preload="auto"></audio>`;
 
-function playTrack(code) {
-  const t = TRACKS[code];
-  if (!t) {
-    statusEl.textContent = "등록되지 않은 QR코드예요: " + code;
-    return;
+  const player = document.getElementById("player");
+  const icon = document.getElementById("icon");
+  const hint = document.getElementById("hint");
+
+  function update() {
+    icon.textContent = player.paused ? "▶" : "❚❚";
+    hint.textContent = player.paused ? "" : "재생 중";
   }
-  nowBox.style.display = "block";
-  nowTitle.textContent = t.title;
-  player.src = t.file;
-  player.play().catch(() => {
-    statusEl.textContent = "▶ 재생 버튼을 눌러주세요";
+  player.addEventListener("play", update);
+  player.addEventListener("pause", update);
+  player.addEventListener("ended", update);
+
+  icon.addEventListener("click", () => {
+    player.paused ? player.play() : player.pause();
   });
-  statusEl.textContent = "재생 중: " + t.title;
-}
 
-// QR 안의 글자가 주소(예: .../qr-audio/?t=track01)여도 인식되게 처리
-function getCode(text) {
-  try {
-    const url = new URL(text);
-    return url.searchParams.get("t") || text;
-  } catch (e) {
-    return text.trim();
-  }
-}
-
-startBtn.addEventListener("click", async () => {
-  // 휴대폰에서 자동재생이 막히지 않도록, 버튼을 누른 순간 오디오를 미리 깨워둠
-  player.muted = true;
-  player.src = Object.values(TRACKS)[0].file;
-  try { await player.play(); player.pause(); } catch (e) {}
-  player.muted = false;
-
-  startBtn.style.display = "none";
-  statusEl.textContent = "카메라를 켜는 중...";
-
-  const scanner = new Html5Qrcode("reader");
-  try {
-    await scanner.start(
-      { facingMode: "environment" },
-      { fps: 10, qrbox: 230 },
-      (text) => {
-        const code = getCode(text);
-        const now = Date.now();
-        // 같은 QR을 계속 비추고 있을 때 처음부터 반복 재생되지 않게 막음
-        if (code === lastCode && now - lastTime < 5000) return;
-        lastCode = code;
-        lastTime = now;
-        playTrack(code);
-      }
-    );
-    statusEl.textContent = "QR코드를 비춰주세요";
-  } catch (err) {
-    statusEl.textContent = "카메라를 켤 수 없어요. 카메라 권한을 허용했는지 확인해주세요.";
-    startBtn.style.display = "inline-block";
-  }
-});
-
-// 휴대폰 기본 카메라로 찍어서 ?t=track01 주소로 들어온 경우
-const param = new URLSearchParams(location.search).get("t");
-if (param && TRACKS[param]) {
-  startBtn.textContent = "▶ " + TRACKS[param].title + " 듣기";
-  startBtn.onclick = () => {
-    startBtn.style.display = "none";
-    playTrack(param);
-  };
+  // 1) 먼저 바로 재생을 시도
+  player.play().then(update).catch(() => {
+    // 2) 휴대폰이 자동재생을 막으면, 화면 아무 곳이나 한 번 누르면 재생
+    hint.textContent = "화면을 한 번 터치하면 재생돼요";
+    tapLayer.style.display = "block";
+    tapLayer.addEventListener("click", () => {
+      tapLayer.style.display = "none";
+      player.play();
+    }, { once: true });
+  });
 }
 </script>
 </body>
