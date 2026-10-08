@@ -6,12 +6,12 @@
 <title>QR 오디오</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
   body {
     font-family: -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
     background: #111; color: #fff;
+    min-height: 100vh;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    padding: 24px 16px; text-align: center;
+    padding: 72px 16px 40px; text-align: center;
   }
   .title { font-size: 26px; font-weight: 700; margin-bottom: 24px; word-break: keep-all; }
   .icon {
@@ -22,6 +22,13 @@
   .icon:active { transform: scale(0.96); }
   .hint { color: #aaa; font-size: 15px; min-height: 22px; }
   audio { width: 100%; max-width: 400px; margin-top: 24px; }
+  /* 프롬프트 상자 */
+  .prompt {
+    width: 100%; max-width: 400px; margin-top: 28px; padding: 16px;
+    background: #1c1c1c; border: 1px solid #333; border-radius: 12px; text-align: left;
+  }
+  .prompt-label { font-size: 12px; font-weight: 700; color: #ffcc00; letter-spacing: 0.05em; margin-bottom: 8px; }
+  .prompt-text { font-size: 15px; line-height: 1.6; color: #ddd; white-space: pre-wrap; word-break: break-word; }
   /* 자동재생이 막혔을 때: 화면 아무 데나 누르면 재생 */
   #tapLayer { position: fixed; inset: 0; display: none; cursor: pointer; }
   #backBtn {
@@ -44,12 +51,26 @@
 <script>
 // ============================================================
 // ✏️ 여기만 수정하세요!
-// 왼쪽: 주소 끝에 붙을 이름 (?t=track01) / file: 같은 폴더에 올린 mp3 파일 이름 / title: 화면 제목
+// 왼쪽: 주소 끝에 붙을 이름 (?t=track01)
+// file: 같은 폴더에 올린 mp3 파일 이름 / title: 화면 제목
+// prompt: 작곡에 쓴 프롬프트 (` ` 기호 사이에 쓰면 여러 줄도 그대로 나와요. 비워두면 상자가 안 보여요)
 // ============================================================
 const TRACKS = {
-  "track01": { file: "Solitary Hope.mp3", title: "1번 노래" },
-  "track02": { file: "track02.mp3", title: "2번 노래" },
-  "track03": { file: "track03.mp3", title: "3번 노래" },
+  "track01": {
+    file: "Solitary Hope.mp3",
+    title: "1번 노래",
+    prompt: `Instrumental cinematic ambient post-rock with minimalist pacing at 60 bpm, Begin with isolated felt-piano notes, close and dry, over a deep sustained dark drone and faint lo-fi dust texture, Let the harmony unfold slowly; introduce a fragile solo cello that swells in long expressive phrases, with sparse glass-bell tones appearing later, Build gently without a beat, keeping the arrangement spacious, solitary, surreal, and gloomy, then turn the final harmony toward poignant hope, Wide cinematic reverb on cello and bells, piano remains intimate, restrained dynamics, soft unresolved ending`
+  },
+  "track02": {
+    file: "track02.mp3",
+    title: "2번 노래",
+    prompt: ``
+  },
+  "track03": {
+    file: "track03.mp3",
+    title: "3번 노래",
+    prompt: ``
+  },
 };
 // ============================================================
 
@@ -69,12 +90,25 @@ if (!track) {
     <p class="title">${track.title}</p>
     <div class="icon" id="icon">▶</div>
     <p class="hint" id="hint">불러오는 중...</p>
-    <audio id="player" src="${track.file}" controls playsinline preload="auto"></audio>`;
+    <audio id="player" src="${track.file}" controls playsinline preload="auto"></audio>
+    <div class="prompt" id="promptBox">
+      <p class="prompt-label">PROMPT</p>
+      <p class="prompt-text" id="promptText"></p>
+    </div>`;
+
+  // 프롬프트 넣기 (비어 있으면 상자 숨김)
+  const promptText = (track.prompt || "").trim();
+  if (promptText) {
+    document.getElementById("promptText").textContent = promptText;
+  } else {
+    document.getElementById("promptBox").style.display = "none";
+  }
 
   const player = document.getElementById("player");
   const icon = document.getElementById("icon");
   const hint = document.getElementById("hint");
-   // 목록으로 돌아갈 때 노래 멈추기
+
+  // 목록으로 돌아갈 때 노래 멈추기
   document.getElementById("backBtn").addEventListener("click", () => {
     player.pause();
     player.currentTime = 0;
