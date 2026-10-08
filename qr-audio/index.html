@@ -24,6 +24,11 @@
   audio { width: 100%; max-width: 400px; margin-top: 24px; }
   /* 자동재생이 막혔을 때: 화면 아무 데나 누르면 재생 */
   #tapLayer { position: fixed; inset: 0; display: none; cursor: pointer; }
+  #backBtn {
+    position: fixed; top: 16px; left: 16px; z-index: 10;
+    padding: 10px 16px; border-radius: 999px; background: #333; color: #fff;
+    font-size: 16px; text-decoration: none;
+  }
   ul { list-style: none; width: 100%; max-width: 400px; }
   li a {
     display: block; padding: 16px; margin: 8px 0; background: #222; border-radius: 12px;
@@ -42,7 +47,7 @@
 // 왼쪽: 주소 끝에 붙을 이름 (?t=track01) / file: 같은 폴더에 올린 mp3 파일 이름 / title: 화면 제목
 // ============================================================
 const TRACKS = {
-  "track01": { file: "Solitary Hope.mp3", title: "1번 노래" },
+  "track01": { file: "SolitaryHope.mp3", title: "1번 노래" },
   "track02": { file: "track02.mp3", title: "2번 노래" },
   "track03": { file: "track03.mp3", title: "3번 노래" },
 };
@@ -60,6 +65,7 @@ if (!track) {
       `<li><a href="?t=${k}">▶ ${t.title}</a></li>`).join("") + "</ul>";
 } else {
   main.innerHTML = `
+    <a id="backBtn" href="./">← 목록</a>
     <p class="title">${track.title}</p>
     <div class="icon" id="icon">▶</div>
     <p class="hint" id="hint">불러오는 중...</p>
