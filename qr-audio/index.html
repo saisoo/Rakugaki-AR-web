@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QR 오디오</title>
+<title>AI SOUND ARTWORK</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -91,7 +91,7 @@ const track = TRACKS[code];
 
 if (!track) {
   // 주소에 곡 이름이 없으면 전체 목록을 보여줌
-  main.innerHTML = '<p class="title">🎧 곡 목록</p><ul>' +
+  main.innerHTML = '<p class="title">Sound List</p><ul>' +
     Object.entries(TRACKS).map(([k, t]) =>
       `<li><a href="?t=${k}">▶ ${t.title}</a></li>`).join("") + "</ul>";
 } else {
